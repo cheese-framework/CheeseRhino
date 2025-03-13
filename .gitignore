@@ -1,0 +1,28 @@
+# os specific
+.DS_Store
+
+# build directories
+build/
+lib/
+
+# artifacts
+*.zip
+*.iml
+.idea/
+out/
+target/
+.gradle
+*~
+
+# eclipse
+.classpath
+.project
+bin/
+.settings/
+
+# idea
+rhino.ipr
+rhino.iws
+
+# VSCode
+.vscode
