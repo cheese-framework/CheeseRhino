@@ -1,0 +1,79 @@
+name: 构建 Cheese Rhino
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '0001-*.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "🚀 开始"
+        run: echo "开始构建 Cheese Rhino..."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: "📥 克隆"
+        run: |
+          echo "克隆 Rhino 仓库..."
+          rm -rf rhino
+          git clone https://github.com/mozilla/rhino.git rhino
+          
+          cd rhino
+          DATE=$(date +%Y%m%d-%H%M%S)
+          COMMIT=$(git rev-parse --short HEAD)
+          
+          echo "BUILD_DATE=$DATE" >> $GITHUB_ENV
+          echo "COMMIT=$COMMIT" >> $GITHUB_ENV
+          
+          echo "✅ 时间: $DATE"
+          echo "✅ 提交: $COMMIT"
+
+      - name: "🔧 补丁"
+        run: |
+          cd rhino
+          echo "应用补丁..."
+          
+          if patch -p1 < ../0001-*.patch; then
+            echo "✅ 补丁应用成功"
+          else
+            echo "❌ 补丁应用失败"
+            exit 1
+          fi
+
+      - name: "🏗️ 编译"
+        run: |
+          cd rhino
+          chmod +x gradlew
+          ./gradlew :rhino-all:build
+          echo "✅ 编译成功"
+
+      - name: "📦 打包"
+        run: |
+          cd rhino
+          JAR=$(ls rhino-all/build/libs/rhino-*.jar | head -1)
+          NEW_NAME="cheese-rhino.jar"
+          cp "$JAR" "../$NEW_NAME"
+          echo "✅ 打包完成"
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "build-${{ env.BUILD_DATE }}"
+          name: "Cheese Rhino Build ${{ env.BUILD_DATE }}"
+          body: "每日构建 ${{ env.BUILD_DATE }}"
+          files: cheese-rhino.jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
