@@ -1,0 +1,298 @@
+From 6d6d403b07b83885fe9156997512b2b3f731e9aa Mon Sep 17 00:00:00 2001
+From: coco <3560000009@qq.com>
+Date: Sun, 28 Dec 2025 10:12:00 +0800
+Subject: [PATCH] Provide modular management functionality for cheese
+
+---
+ .../net/codeocean/cheese/ModuleProvider.java  | 111 ++++++++++++++++
+ .../net/codeocean/cheese/SourceReader.java    | 122 ++++++++++++++++++
+ .../javascript/tools/shell/Global.java        |   4 +-
+ rhino/src/main/java/module-info.java          |   1 +
+ 4 files changed, 237 insertions(+), 1 deletion(-)
+ create mode 100644 rhino-tools/src/main/java/net/codeocean/cheese/ModuleProvider.java
+ create mode 100644 rhino-tools/src/main/java/net/codeocean/cheese/SourceReader.java
+
+diff --git a/rhino-tools/src/main/java/net/codeocean/cheese/ModuleProvider.java b/rhino-tools/src/main/java/net/codeocean/cheese/ModuleProvider.java
+new file mode 100644
+index 000000000..10036fb14
+--- /dev/null
++++ b/rhino-tools/src/main/java/net/codeocean/cheese/ModuleProvider.java
+@@ -0,0 +1,111 @@
++package net.codeocean.cheese;
++
++
++import java.io.File;
++import java.io.IOException;
++import java.net.URI;
++import java.net.URISyntaxException;
++
++import org.mozilla.javascript.commonjs.module.provider.UrlModuleSourceProvider;
++import org.mozilla.javascript.json.JsonParser;
++import org.mozilla.javascript.json.JsonParser.ParseException;
++import org.mozilla.javascript.commonjs.module.provider.ModuleSource;
++import org.mozilla.javascript.Context;
++import org.mozilla.javascript.NativeObject;
++
++
++/**
++ * An extension of Rhino's UrlModuleSourceProvider that supports Node.js/CommonJS packages.
++ * @author Jeff Williams
++ */
++public class ModuleProvider extends UrlModuleSourceProvider {
++    private static final String JS_EXTENSION = ".js";
++    private static final String PATH_SEPARATOR = "/";
++    private static final String PACKAGE_FILE = "package.json";
++    private static final String MODULE_INDEX = "index" + JS_EXTENSION;
++
++    public ModuleProvider(Iterable<URI> privilegedUris, Iterable<URI> fallbackUris) {
++        super(privilegedUris, fallbackUris);
++    }
++
++    @Override
++    protected ModuleSource loadFromUri(URI uri, URI base, Object validator)
++            throws IOException, URISyntaxException {
++        // We expect modules to have a ".js" file name extension ...
++        URI jsUri = ensureJsExtension(uri);
++
++        URI packageUri = new URI(uri.toString() + PATH_SEPARATOR + PACKAGE_FILE);
++        URI indexUri = new URI(uri.toString() + PATH_SEPARATOR + MODULE_INDEX);
++
++        try {
++            URI moduleUri = getModuleUri(jsUri, packageUri, indexUri);
++            ModuleSource source = loadFromActualUri(moduleUri, base, validator);
++            // ... but for compatibility we support modules without extension,
++            // or ids with explicit extension.
++            return source != null ? source : loadFromActualUri(uri, base, validator);
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    private URI getModuleUri(URI jsUri, URI packageUri, URI indexUri)
++            throws SecurityException, IOException, ParseException {
++        // Check for the following, in this order:
++        // 1. The file jsFile.
++        // 2. The "main" property of the JSON file packageFile.
++        // 3. The file indexFile.
++        if (new File(jsUri).isFile()) {
++            return jsUri;
++        }
++
++        if (new File(packageUri).isFile()) {
++            URI packageMain = getPackageMain(packageUri);
++            if (packageMain != null) {
++                return packageMain;
++            }
++        }
++
++        if (new File(indexUri).isFile()) {
++            return indexUri;
++        }
++
++        // couldn't find the module URI
++        return null;
++    }
++
++    private URI getPackageMain(URI packageUri) throws IOException, ParseException {
++        return getPackageMain(new File(packageUri));
++    }
++
++    private URI getPackageMain(File packageFile) throws IOException, ParseException {
++        NativeObject packageJson = parsePackageFile(packageFile);
++        String mainFile = (String) packageJson.get("main");
++        if (mainFile != null) {
++            mainFile = ensureJsExtension(mainFile);
++            return packageFile.toURI().resolve(mainFile);
++        } else {
++            return null;
++        }
++    }
++
++    private URI ensureJsExtension(URI uri) throws URISyntaxException {
++        String str = uri.toString();
++        return new URI(ensureJsExtension(str));
++    }
++
++    private String ensureJsExtension(String str) {
++        if (!str.endsWith(JS_EXTENSION)) {
++            str += JS_EXTENSION;
++        }
++        return str;
++    }
++
++    private NativeObject parsePackageFile(File packageFile) throws IOException, ParseException {
++        String packageJson = SourceReader.readFileOrUrl(packageFile.toString(), true, "UTF-8").
++                toString();
++
++        Context cx = Context.enter();
++        JsonParser parser = new JsonParser(cx, cx.initStandardObjects());
++        return (NativeObject) parser.parseValue(packageJson);
++    }
++}
+\ No newline at end of file
+diff --git a/rhino-tools/src/main/java/net/codeocean/cheese/SourceReader.java b/rhino-tools/src/main/java/net/codeocean/cheese/SourceReader.java
+new file mode 100644
+index 000000000..79757a87b
+--- /dev/null
++++ b/rhino-tools/src/main/java/net/codeocean/cheese/SourceReader.java
+@@ -0,0 +1,122 @@
++package net.codeocean.cheese;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.MalformedURLException;
++import java.net.URL;
++import java.net.URLConnection;
++
++import org.mozilla.javascript.Kit;
++import org.mozilla.javascript.commonjs.module.provider.ParsedContentType;
++
++
++public class SourceReader
++{
++    public static Object readFileOrUrl(String path, boolean convertToString,
++                                       String defaultEncoding) throws IOException
++    {
++        URL url = null;
++        // Assume path is URL if it contains dot and there are at least
++        // 2 characters in the protocol part. The later allows under Windows
++        // to interpret paths with driver letter as file, not URL.
++        if (path.indexOf(':') >= 2) {
++            try {
++                url = new URL(path);
++            } catch (MalformedURLException ex) {
++            }
++        }
++
++        InputStream is = null;
++        int capacityHint = 0;
++        String encoding;
++        final String contentType;
++        byte[] data;
++        try {
++            if (url == null) {
++                File file = new File(path);
++                contentType = encoding = null;
++                capacityHint = (int)file.length();
++                is = new FileInputStream(file);
++            } else {
++                URLConnection uc = url.openConnection();
++                is = uc.getInputStream();
++                if(convertToString) {
++                    ParsedContentType pct = new ParsedContentType(uc.getContentType());
++                    contentType = pct.getContentType();
++                    encoding = pct.getEncoding();
++                }
++                else {
++                    contentType = encoding = null;
++                }
++                capacityHint = uc.getContentLength();
++                // Ignore insane values for Content-Length
++                if (capacityHint > (1 << 20)) {
++                    capacityHint = -1;
++                }
++            }
++            if (capacityHint <= 0) {
++                capacityHint = 4096;
++            }
++
++            data = Kit.readStream(is, capacityHint);
++        } finally {
++            if(is != null) {
++                is.close();
++            }
++        }
++
++        Object result;
++        if (!convertToString) {
++            result = data;
++        } else {
++            if(encoding == null) {
++                // None explicitly specified in Content-type header. Use RFC-4329
++                // 4.2.2 section to autodetect
++                if(data.length > 3 && data[0] == -1 && data[1] == -2 && data[2] == 0 && data[3] == 0) {
++                    encoding = "UTF-32LE";
++                }
++                else if(data.length > 3 && data[0] == 0 && data[1] == 0 && data[2] == -2 && data[3] == -1) {
++                    encoding = "UTF-32BE";
++                }
++                else if(data.length > 2 && data[0] == -17 && data[1] == -69 && data[2] == -65) {
++                    encoding = "UTF-8";
++                }
++                else if(data.length > 1 && data[0] == -1 && data[1] == -2) {
++                    encoding = "UTF-16LE";
++                }
++                else if(data.length > 1 && data[0] == -2 && data[1] == -1) {
++                    encoding = "UTF-16BE";
++                }
++                else {
++                    // No autodetect. See if we have explicit value on command line
++                    encoding = defaultEncoding;
++                    if(encoding == null) {
++                        // No explicit encoding specification
++                        if(url == null) {
++                            // Local files default to system encoding
++                            encoding = System.getProperty("file.encoding");
++                        }
++                        else if(contentType != null && contentType.startsWith("application/")) {
++                            // application/* types default to UTF-8
++                            encoding = "UTF-8";
++                        }
++                        else {
++                            // text/* MIME types default to US-ASCII
++                            encoding = "US-ASCII";
++                        }
++                    }
++                }
++            }
++            String strResult = new String(data, encoding);
++            // Skip BOM
++            if(strResult.length() > 0 && strResult.charAt(0) == '\uFEFF')
++            {
++                strResult = strResult.substring(1);
++            }
++            result = strResult;
++        }
++        return result;
++    }
++}
+\ No newline at end of file
+diff --git a/rhino-tools/src/main/java/org/mozilla/javascript/tools/shell/Global.java b/rhino-tools/src/main/java/org/mozilla/javascript/tools/shell/Global.java
+index ca68e3ae8..780e0dda8 100644
+--- a/rhino-tools/src/main/java/org/mozilla/javascript/tools/shell/Global.java
++++ b/rhino-tools/src/main/java/org/mozilla/javascript/tools/shell/Global.java
+@@ -30,6 +30,8 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
++
++import net.codeocean.cheese.ModuleProvider;
+ import org.mozilla.javascript.Context;
+ import org.mozilla.javascript.ContextAction;
+ import org.mozilla.javascript.ContextFactory;
+@@ -166,7 +168,7 @@ public class Global extends ImporterTopLevel {
+             }
+         }
+         rb.setModuleScriptProvider(
+-                new SoftCachingModuleScriptProvider(new UrlModuleSourceProvider(uris, null)));
++                new SoftCachingModuleScriptProvider(new ModuleProvider(uris, null)));
+         Require require = rb.createRequire(cx, this);
+         require.install(this);
+         return require;
+diff --git a/rhino/src/main/java/module-info.java b/rhino/src/main/java/module-info.java
+index 4c9dcd769..2697f9dcc 100644
+--- a/rhino/src/main/java/module-info.java
++++ b/rhino/src/main/java/module-info.java
+@@ -14,6 +14,7 @@ module org.mozilla.rhino {
+     exports org.mozilla.javascript.xml;
+     exports org.mozilla.javascript.config;
+     exports org.mozilla.javascript.lc.type;
++    exports org.mozilla.javascript.json;
+ 
+     uses org.mozilla.javascript.RegExpLoader;
+     uses org.mozilla.javascript.xml.XMLLoader;
+-- 
+2.52.0.windows.1
+
